@@ -4,8 +4,11 @@ from firebase_admin import credentials, db, exceptions
 import pandas as pd
 from datetime import datetime
 import time
+import os
 
 # Initialize session state
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
 if 'df' not in st.session_state:
     st.session_state.df = pd.DataFrame(columns=["Time", "Distance"])
 if 'last_update' not in st.session_state:
@@ -13,44 +16,50 @@ if 'last_update' not in st.session_state:
 if 'auto_refresh' not in st.session_state:
     st.session_state.auto_refresh = True
 
-# Firebase initialization - moved outside of functions
-try:
-    default_app = firebase_admin.get_app()
-except ValueError:
-    # Initialize Firebase only if it hasn't been initialized
-    cred = credentials.Certificate("firebase-adminsdk.json")
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://smart-container-46c13-default-rtdb.firebaseio.com/'
-    })
+# Set static credentials
+VALID_USERNAME = "admin"
+VALID_PASSWORD = "admin123"
 
-# Fetch data from Firebase with error handling
-def fetch_data():
+def login():
+    st.title("Smart Container Dashboard Login")
+    
+    # Create login form
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    
+    if st.button("Login"):
+        if username == VALID_USERNAME and password == VALID_PASSWORD:
+            st.session_state.logged_in = True
+            st.rerun()
+        else:
+            st.error("Invalid username or password")
+
+def main_dashboard():
+    # Firebase initialization
     try:
-        ref = db.reference('/sensor/distance')
-        return ref.get()
-    except exceptions.FirebaseError as e:
-        st.error(f"Firebase error: {str(e)}")
-        return None
-    except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
-        return None
+        default_app = firebase_admin.get_app()
+    except ValueError:
+        # Initialize Firebase only if it hasn't been initialized
+        try:
+            cred = credentials.Certificate("firebase-adminsdk.json")
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': 'https://smart-container-46c13-default-rtdb.firebaseio.com/'
+            })
+        except Exception as e:
+            st.error(f"Firebase initialization error: {str(e)}")
+            return
 
-# Calculate container level
-def calculate_container_level(distance):
-    try:
-        distance = float(distance)
-        return max(0, min(100, (120 - distance) * (100 / 80)))
-    except (TypeError, ValueError):
-        st.error("Invalid distance value received")
-        return None
-
-def main():
     # Page configuration
     st.set_page_config(
         page_title="Smart Container Dashboard",
         layout="wide",
         initial_sidebar_state="expanded"
     )
+
+    # Add logout button in sidebar
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
 
     # Title and description
     st.title("Smart Container Dashboard")
@@ -100,68 +109,83 @@ def main():
     table_container = st.empty()
     download_container = st.empty()
 
-    # Real-time data update
-    data = fetch_data()
-    
-    if data is not None:
-        # Calculate container level
-        container_level = calculate_container_level(data)
+    try:
+        # Real-time data update
+        ref = db.reference('/sensor/distance')
+        data = ref.get()
         
-        if container_level is not None:
-            # Update DataFrame
-            current_time = pd.Timestamp.now()
-            new_row = pd.DataFrame({
-                "Time": [current_time],
-                "Distance": [container_level]
-            })
-            st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
-            st.session_state.df = st.session_state.df.tail(100)  # Keep only last 100 records
-
-            # Update metric
-            delta = None
-            if len(st.session_state.df) > 1:
-                delta = container_level - st.session_state.df['Distance'].iloc[-2]
+        if data is not None:
+            # Calculate container level
+            try:
+                distance = float(data)
+                container_level = max(0, min(100, (120 - distance) * (100 / 80)))
                 
-            level_metric.metric(
-                label="Container Level",
-                value=f"{container_level:.1f}%",
-                delta=f"{delta:.1f}%" if delta is not None else None
-            )
+                # Update DataFrame
+                current_time = pd.Timestamp.now()
+                new_row = pd.DataFrame({
+                    "Time": [current_time],
+                    "Distance": [container_level]
+                })
+                st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
+                st.session_state.df = st.session_state.df.tail(100)  # Keep only last 100 records
 
-            # Update last update time
-            st.session_state.last_update = datetime.now()
-            last_update_text.text(
-                f"Last updated: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+                # Update metric
+                delta = None
+                if len(st.session_state.df) > 1:
+                    delta = container_level - st.session_state.df['Distance'].iloc[-2]
+                    
+                level_metric.metric(
+                    label="Container Level",
+                    value=f"{container_level:.1f}%",
+                    delta=f"{delta:.1f}%" if delta is not None else None
+                )
 
-            # Update chart
-            chart_container.line_chart(
-                st.session_state.df.set_index("Time")["Distance"],
-                use_container_width=True
-            )
+                # Update last update time
+                st.session_state.last_update = datetime.now()
+                last_update_text.text(
+                    f"Last updated: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
 
-            # Update table
-            table_container.dataframe(
-                st.session_state.df.sort_values("Time", ascending=False),
-                use_container_width=True,
-                hide_index=True
-            )
+                # Update chart
+                chart_container.line_chart(
+                    st.session_state.df.set_index("Time")["Distance"],
+                    use_container_width=True
+                )
 
-            # Update download button
-            csv = st.session_state.df.to_csv(index=False).encode('utf-8')
-            download_container.download_button(
-                label="📥 Download Data as CSV",
-                data=csv,
-                file_name=f"container_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
+                # Update table
+                table_container.dataframe(
+                    st.session_state.df.sort_values("Time", ascending=False),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
-    # Auto-refresh implementation using st.empty()
+                # Update download button
+                csv = st.session_state.df.to_csv(index=False).encode('utf-8')
+                download_container.download_button(
+                    label="📥 Download Data as CSV",
+                    data=csv,
+                    file_name=f"container_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+
+            except (TypeError, ValueError) as e:
+                st.error(f"Error processing data: {str(e)}")
+        else:
+            st.warning("No data available from sensor")
+
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+
+    # Auto-refresh implementation
     if st.session_state.auto_refresh:
-        placeholder = st.empty()
-        with placeholder.container():
-            time.sleep(update_interval)
-            st.rerun()
+        time.sleep(update_interval)
+        st.rerun()
+
+def main():
+    if not st.session_state.logged_in:
+        login()
+    else:
+        main_dashboard()
 
 if __name__ == "__main__":
     main()
